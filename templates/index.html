@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>External Metadata Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f8f9fa;
+            padding: 20px;
+            color: #333;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            font-size: 18px;
+            color: #333;
+        }
+
+        .status {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status.waiting {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .content {
+            display: grid;
+            gap: 20px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+
+        .card-header {
+            font-size: 14px;
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .metadata-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .metadata-item {
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+
+        .metadata-label {
+            font-size: 11px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+
+        .metadata-value {
+            font-size: 14px;
+            color: #333;
+            font-weight: 600;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .metric {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .metric-label {
+            font-size: 10px;
+            opacity: 0.9;
+            text-transform: uppercase;
+        }
+
+        .tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            margin-top: 10px;
+        }
+
+        .tag {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        .notes {
+            background: #f0f4ff;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin-top: 15px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #555;
+        }
+
+        .loading {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🗄️ External Metadata Viewer</h1>
+        <span id="status" class="status waiting">Waiting for Asset</span>
+    </div>
+
+    <div id="content" class="content">
+        <div class="card">
+            <div class="loading">
+                <div class="spinner"></div>
+                <div>Waiting for asset context from Atlan...</div>
+                <div style="margin-top: 10px; font-size: 12px; color: #666;">
+                    Select an asset in Atlan to view external metadata
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentGuid = null;
+
+        // postMessage handler
+        window.addEventListener('message', async (event) => {
+            console.log('Received message:', event.data);
+
+            // Accept messages from Atlan or localhost (for testing)
+            const allowedOrigins = [
+                'https://home.atlan.com',
+                'https://partner-sandbox.atlan.com',
+                'http://localhost:3001'
+            ];
+
+            if (!allowedOrigins.includes(event.origin) && event.origin !== window.location.origin) {
+                console.log('Ignoring message from unauthorized origin:', event.origin);
+                return;
+            }
+
+            const { type, payload } = event.data;
+
+            if (type === 'ATLAN_AUTH_CONTEXT' && payload && payload.page && payload.page.params) {
+                const assetGuid = payload.page.params.id;
+
+                if (assetGuid && assetGuid !== currentGuid) {
+                    currentGuid = assetGuid;
+                    document.getElementById('status').className = 'status connected';
+                    document.getElementById('status').textContent = 'Connected';
+                    await loadMetadata(assetGuid);
+                }
+            }
+        });
+
+        async function loadMetadata(guid) {
+            console.log('Loading metadata for:', guid);
+
+            try {
+                const response = await fetch(`/api/metadata/${guid}`);
+                const result = await response.json();
+
+                if (result.success) {
+                    displayMetadata(result.data);
+                }
+            } catch (error) {
+                console.error('Error loading metadata:', error);
+                document.getElementById('content').innerHTML = `
+                    <div class="card">
+                        <div style="color: #dc3545;">
+                            Error loading metadata: ${error.message}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        function displayMetadata(metadata) {
+            const content = document.getElementById('content');
+
+            content.innerHTML = `
+                <div class="card">
+                    <div class="card-header">📊 Asset Information</div>
+                    <div class="metadata-grid">
+                        <div class="metadata-item">
+                            <div class="metadata-label">Asset Name</div>
+                            <div class="metadata-value">${metadata.asset_name || 'Unknown'}</div>
+                        </div>
+                        <div class="metadata-item">
+                            <div class="metadata-label">Business Owner</div>
+                            <div class="metadata-value">${metadata.business_owner || 'Not Specified'}</div>
+                        </div>
+                        <div class="metadata-item">
+                            <div class="metadata-label">Classification</div>
+                            <div class="metadata-value">${metadata.data_classification || 'Unknown'}</div>
+                        </div>
+                        <div class="metadata-item">
+                            <div class="metadata-label">Last Audit</div>
+                            <div class="metadata-value">${metadata.last_audit || 'Never'}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">📈 Quality & Usage Metrics</div>
+                    <div class="metrics-grid">
+                        <div class="metric">
+                            <div class="metric-value">${metadata.quality_score || 0}%</div>
+                            <div class="metric-label">Quality Score</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value">${formatNumber(metadata.row_count || 0)}</div>
+                            <div class="metric-label">Row Count</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value">${metadata.storage_gb || 0} GB</div>
+                            <div class="metric-label">Storage Size</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value">${metadata.usage_count || 0}</div>
+                            <div class="metric-label">Usage Count</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value">${((metadata.error_rate || 0) * 100).toFixed(2)}%</div>
+                            <div class="metric-label">Error Rate</div>
+                        </div>
+                    </div>
+                </div>
+
+                ${metadata.custom_tags && metadata.custom_tags.length > 0 ? `
+                    <div class="card">
+                        <div class="card-header">🏷️ Tags & Dependencies</div>
+                        <div>
+                            <div class="metadata-label">Custom Tags</div>
+                            <div class="tags">
+                                ${metadata.custom_tags.map(tag => `<span class="tag">${tag}</span>`).join('')}
+                            </div>
+                        </div>
+                        ${metadata.dependencies && metadata.dependencies.length > 0 ? `
+                            <div style="margin-top: 15px;">
+                                <div class="metadata-label">Dependencies</div>
+                                <div style="margin-top: 5px; font-size: 14px;">
+                                    ${metadata.dependencies.join(', ')}
+                                </div>
+                            </div>
+                        ` : ''}
+                    </div>
+                ` : ''}
+
+                ${metadata.notes ? `
+                    <div class="card">
+                        <div class="card-header">📝 Notes</div>
+                        <div class="notes">
+                            ${metadata.notes}
+                        </div>
+                    </div>
+                ` : ''}
+
+                <div class="card">
+                    <div class="metadata-label" style="text-align: right;">
+                        Last Updated: ${new Date(metadata.last_updated).toLocaleString()}
+                    </div>
+                </div>
+            `;
+        }
+
+        function formatNumber(num) {
+            return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        }
+
+        // Signal ready
+        window.addEventListener('load', () => {
+            console.log('Sending IFRAME_READY');
+            window.parent.postMessage({
+                type: 'IFRAME_READY',
+                payload: { ready: true }
+            }, '*');
+        });
+    </script>
+</body>
+</html>

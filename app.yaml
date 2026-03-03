@@ -1,0 +1,10 @@
+command: [
+  "python",
+  "app.py"
+]
+
+env:
+  - name: PORT
+    value: "8080"
+  - name: FLASK_ENV
+    value: "production"
