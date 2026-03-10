@@ -359,6 +359,8 @@
         let currentSpaceId = null;
         let currentConversationId = null;
         let isConfigured = false;
+        let handshakeReceived = false;
+        let authContextReceived = false;
 
         // Check configuration on load
         async function checkConfiguration() {
@@ -366,6 +368,7 @@
                 const response = await fetch('/api/config');
                 const data = await response.json();
                 isConfigured = data.configured;
+                console.log('Configuration check:', { configured: isConfigured });
 
                 if (!isConfigured) {
                     document.getElementById('loadingMessage').innerHTML = `
@@ -386,10 +389,18 @@
             }
         }
 
-        // Listen for postMessage from Atlan
+        // Set up message listener immediately (not waiting for window.load)
+        console.log('Setting up message listener at:', new Date().toISOString());
+
         window.addEventListener('message', async (event) => {
-            console.log('Received message:', event.data);
-            console.log('Message origin:', event.origin);
+            console.log('[MESSAGE] Received at', new Date().toISOString(), ':', event.data);
+            console.log('[MESSAGE] Origin:', event.origin);
+
+            // Safety check for data
+            if (!event.data || typeof event.data !== 'object') {
+                console.log('[MESSAGE] Invalid message format, ignoring');
+                return;
+            }
 
             const allowedOrigins = [
                 'https://home.atlan.com',
@@ -398,38 +409,89 @@
             ];
 
             if (!allowedOrigins.includes(event.origin) && event.origin !== window.location.origin) {
-                console.log('Ignoring message from:', event.origin);
+                console.log('[MESSAGE] Ignoring message from unauthorized origin:', event.origin);
                 return;
             }
 
             const { type, payload } = event.data;
-            console.log('Message type:', type);
+            console.log('[MESSAGE] Processing type:', type);
 
             // Handle Atlan handshake
             if (type === 'ATLAN_HANDSHAKE') {
-                console.log('Received handshake, responding with IFRAME_READY');
+                handshakeReceived = true;
+                console.log('[HANDSHAKE] Received, responding with IFRAME_READY');
+
+                // Always respond to handshake
                 window.parent.postMessage({
                     type: 'IFRAME_READY',
                     payload: { ready: true }
                 }, event.origin);
+
+                // Also try to proactively fetch config if not done
+                if (!isConfigured && isConfigured !== false) {
+                    checkConfiguration();
+                }
             }
             // Handle auth context with asset info
-            else if (type === 'ATLAN_AUTH_CONTEXT' && payload && payload.page && payload.page.params) {
-                const spaceGuid = payload.page.params.id;
-                console.log('Loading space with GUID:', spaceGuid);
-                await loadSpace(spaceGuid);
+            else if (type === 'ATLAN_AUTH_CONTEXT') {
+                authContextReceived = true;
+                console.log('[AUTH_CONTEXT] Received:', payload);
+
+                // Defensive check for payload structure
+                if (payload && payload.page && payload.page.params && payload.page.params.id) {
+                    const spaceGuid = payload.page.params.id;
+                    console.log('[AUTH_CONTEXT] Loading space with GUID:', spaceGuid);
+
+                    // Ensure configuration is checked before loading space
+                    if (isConfigured === undefined) {
+                        await checkConfiguration();
+                    }
+
+                    await loadSpace(spaceGuid);
+                } else {
+                    console.error('[AUTH_CONTEXT] Missing required data in payload:', payload);
+                    document.getElementById('loadingMessage').innerHTML = `
+                        <div style="color: #c00;">
+                            <h3>⚠️ Invalid Context</h3>
+                            <p style="margin-top: 10px;">
+                                No asset GUID received from Atlan. Please select a Genie space asset.
+                            </p>
+                        </div>
+                    `;
+                }
+            }
+            // Handle logout
+            else if (type === 'ATLAN_LOGOUT') {
+                console.log('[LOGOUT] Received logout message');
+                currentSpaceId = null;
+                currentConversationId = null;
+                document.getElementById('messages').innerHTML = `
+                    <div class="loading-message">
+                        Session ended. Please refresh to continue.
+                    </div>
+                `;
+                document.getElementById('chatForm').style.display = 'none';
             }
         });
 
-        async function loadSpace(guid) {
-            if (!isConfigured) return;
+        async function loadSpace(guid, retryCount = 0) {
+            // Check configuration status first
+            if (isConfigured === undefined) {
+                console.log('[LOAD_SPACE] Configuration not checked yet, checking now');
+                await checkConfiguration();
+            }
 
-            console.log('Fetching space info for GUID:', guid);
+            if (!isConfigured) {
+                console.log('[LOAD_SPACE] Not configured, cannot load space');
+                return;
+            }
+
+            console.log(`[LOAD_SPACE] Fetching space info for GUID: ${guid} (attempt ${retryCount + 1})`);
 
             try {
                 const response = await fetch(`/api/space/${guid}`);
                 const data = await response.json();
-                console.log('Space API response:', data);
+                console.log('[LOAD_SPACE] API response:', data);
 
                 if (data.success) {
                     currentSpaceId = data.space_id;
@@ -497,12 +559,34 @@
                     document.getElementById('loadingMessage').innerHTML = errorHtml;
                 }
             } catch (error) {
-                console.error('Failed to load space:', error);
-                document.getElementById('loadingMessage').innerHTML = `
-                    <div style="color: #c00;">
-                        Failed to load space: ${error.message}
-                    </div>
-                `;
+                console.error('[LOAD_SPACE] Failed to load space:', error);
+
+                // Retry logic for network errors
+                if (retryCount < 2 && error.name === 'TypeError') {
+                    console.log(`[LOAD_SPACE] Network error, retrying in 1 second...`);
+                    setTimeout(() => {
+                        loadSpace(guid, retryCount + 1);
+                    }, 1000);
+                } else {
+                    document.getElementById('loadingMessage').innerHTML = `
+                        <div style="color: #c00;">
+                            <h3>⚠️ Failed to load space</h3>
+                            <p style="margin-top: 10px;">${error.message}</p>
+                            <button onclick="location.reload()" style="
+                                margin-top: 15px;
+                                padding: 10px 20px;
+                                background: #667eea;
+                                color: white;
+                                border: none;
+                                border-radius: 6px;
+                                cursor: pointer;
+                                font-size: 14px;
+                            ">
+                                Refresh Page
+                            </button>
+                        </div>
+                    `;
+                }
             }
         }
 
@@ -614,19 +698,30 @@
             }
         });
 
-        // Signal ready
-        window.addEventListener('load', () => {
+        // Initialize on DOM ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => {
+                console.log('[INIT] DOM ready, checking configuration');
+                checkConfiguration();
+            });
+        } else {
+            // DOM already loaded
+            console.log('[INIT] DOM already loaded, checking configuration');
             checkConfiguration();
+        }
 
-            // Send IFRAME_READY to parent (Atlan)
-            const parentOrigin = document.referrer ? new URL(document.referrer).origin : 'https://partner-sandbox.atlan.com';
-            console.log('Sending IFRAME_READY to parent origin:', parentOrigin);
+        // Proactively send ready signal after a small delay to handle timing issues
+        setTimeout(() => {
+            if (!handshakeReceived) {
+                console.log('[INIT] No handshake received yet, proactively sending IFRAME_READY');
+                const parentOrigin = document.referrer ? new URL(document.referrer).origin : 'https://partner-sandbox.atlan.com';
 
-            window.parent.postMessage({
-                type: 'IFRAME_READY',
-                payload: { ready: true }
-            }, parentOrigin);
-        });
+                window.parent.postMessage({
+                    type: 'IFRAME_READY',
+                    payload: { ready: true }
+                }, parentOrigin);
+            }
+        }, 500);
 
         // Test mode - for development
         const urlParams = new URLSearchParams(window.location.search);
