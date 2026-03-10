@@ -389,6 +389,7 @@
         // Listen for postMessage from Atlan
         window.addEventListener('message', async (event) => {
             console.log('Received message:', event.data);
+            console.log('Message origin:', event.origin);
 
             const allowedOrigins = [
                 'https://home.atlan.com',
@@ -402,9 +403,20 @@
             }
 
             const { type, payload } = event.data;
+            console.log('Message type:', type);
 
-            if (type === 'ATLAN_AUTH_CONTEXT' && payload && payload.page && payload.page.params) {
+            // Handle Atlan handshake
+            if (type === 'ATLAN_HANDSHAKE') {
+                console.log('Received handshake, responding with IFRAME_READY');
+                window.parent.postMessage({
+                    type: 'IFRAME_READY',
+                    payload: { ready: true }
+                }, event.origin);
+            }
+            // Handle auth context with asset info
+            else if (type === 'ATLAN_AUTH_CONTEXT' && payload && payload.page && payload.page.params) {
                 const spaceGuid = payload.page.params.id;
+                console.log('Loading space with GUID:', spaceGuid);
                 await loadSpace(spaceGuid);
             }
         });
@@ -412,9 +424,12 @@
         async function loadSpace(guid) {
             if (!isConfigured) return;
 
+            console.log('Fetching space info for GUID:', guid);
+
             try {
                 const response = await fetch(`/api/space/${guid}`);
                 const data = await response.json();
+                console.log('Space API response:', data);
 
                 if (data.success) {
                     currentSpaceId = data.space_id;
@@ -602,10 +617,15 @@
         // Signal ready
         window.addEventListener('load', () => {
             checkConfiguration();
+
+            // Send IFRAME_READY to parent (Atlan)
+            const parentOrigin = document.referrer ? new URL(document.referrer).origin : 'https://partner-sandbox.atlan.com';
+            console.log('Sending IFRAME_READY to parent origin:', parentOrigin);
+
             window.parent.postMessage({
                 type: 'IFRAME_READY',
                 payload: { ready: true }
-            }, '*');
+            }, parentOrigin);
         });
 
         // Test mode - for development
