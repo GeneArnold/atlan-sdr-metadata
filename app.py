@@ -5,7 +5,7 @@ Embedded chat interface for Databricks Genie spaces within Atlan
 from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 import os
-import httpx
+import requests
 import time
 from typing import Dict, Any, Optional, Tuple
 from dotenv import load_dotenv
@@ -48,33 +48,30 @@ class GenieClient:
         url = f"{self.api_base}/spaces/{space_id}/start-conversation"
         payload = {"content": question}
 
-        with httpx.Client(timeout=30.0) as client:
-            response = client.post(url, json=payload, headers=self.headers)
-            if response.status_code == 401:
-                raise Exception("Authentication failed. Check your Databricks token.")
-            response.raise_for_status()
-            data = response.json()
-            return data["conversation_id"], data["message_id"]
+        response = requests.post(url, json=payload, headers=self.headers, timeout=30.0)
+        if response.status_code == 401:
+            raise Exception("Authentication failed. Check your Databricks token.")
+        response.raise_for_status()
+        data = response.json()
+        return data["conversation_id"], data["message_id"]
 
     def continue_conversation(self, space_id: str, conversation_id: str, question: str) -> str:
         """Continue existing conversation"""
         url = f"{self.api_base}/spaces/{space_id}/conversations/{conversation_id}/messages"
         payload = {"content": question}
 
-        with httpx.Client(timeout=30.0) as client:
-            response = client.post(url, json=payload, headers=self.headers)
-            response.raise_for_status()
-            data = response.json()
-            return data["message_id"]
+        response = requests.post(url, json=payload, headers=self.headers, timeout=30.0)
+        response.raise_for_status()
+        data = response.json()
+        return data["message_id"]
 
     def get_message_status(self, space_id: str, conversation_id: str, message_id: str) -> Dict[str, Any]:
         """Get message status and results"""
         url = f"{self.api_base}/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
 
-        with httpx.Client(timeout=30.0) as client:
-            response = client.get(url, headers=self.headers)
-            response.raise_for_status()
-            return response.json()
+        response = requests.get(url, headers=self.headers, timeout=30.0)
+        response.raise_for_status()
+        return response.json()
 
     def wait_for_response(
         self,
