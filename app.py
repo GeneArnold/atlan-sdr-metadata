@@ -62,6 +62,22 @@ EXTERNAL_METADATA = {
         'dependencies': ['authentication_logs', 'session_data'],
         'notes': 'Contains PII data. GDPR compliance checks automated. Encrypted at rest and in transit.',
         'last_updated': datetime.now().isoformat()
+    },
+    # Real Atlan asset - Wide World Importers - Processed Gold
+    'ca146cea-c06c-4652-a1af-99515f3073ac': {
+        'asset_name': 'Wide World Importers - Processed Gold',
+        'business_owner': 'Gene Arnold',
+        'data_classification': 'Business Critical',
+        'quality_score': 98,
+        'row_count': 8750432,
+        'storage_gb': 256.8,
+        'usage_count': 5678,
+        'error_rate': 0.002,
+        'last_audit': '2024-03-08',
+        'custom_tags': ['gold-tier', 'processed', 'analytics-ready', 'wide-world'],
+        'dependencies': ['raw_imports', 'staging_tables', 'dimension_tables'],
+        'notes': 'This is the gold layer processed data from Wide World Importers. Data is fully validated, cleaned, and ready for analytics consumption. Updated daily at 2 AM UTC.',
+        'last_updated': datetime.now().isoformat()
     }
 }
 
