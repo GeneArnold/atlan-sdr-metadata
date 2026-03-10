@@ -358,7 +358,7 @@
     <script>
         let currentSpaceId = null;
         let currentConversationId = null;
-        let isConfigured = false;
+        let isConfigured = undefined;  // Start as undefined so we know if it hasn't been checked yet
         let handshakeReceived = false;
         let authContextReceived = false;
 
@@ -384,8 +384,11 @@
                         </div>
                     `;
                 }
+                return isConfigured;
             } catch (error) {
                 console.error('Configuration check failed:', error);
+                isConfigured = false;
+                return false;
             }
         }
 
@@ -428,7 +431,7 @@
                 }, event.origin);
 
                 // Also try to proactively fetch config if not done
-                if (!isConfigured && isConfigured !== false) {
+                if (isConfigured === undefined) {
                     checkConfiguration();
                 }
             }
@@ -698,16 +701,17 @@
             }
         });
 
-        // Initialize on DOM ready
+        // Check configuration immediately (don't wait for DOM)
+        console.log('[INIT] Checking configuration immediately');
+        checkConfiguration();
+
+        // Also set up DOM ready handler for UI updates
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
-                console.log('[INIT] DOM ready, checking configuration');
-                checkConfiguration();
+                console.log('[INIT] DOM ready');
             });
         } else {
-            // DOM already loaded
-            console.log('[INIT] DOM already loaded, checking configuration');
-            checkConfiguration();
+            console.log('[INIT] DOM already loaded');
         }
 
         // Proactively send ready signal after a small delay to handle timing issues
