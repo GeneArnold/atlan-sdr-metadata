@@ -10,6 +10,8 @@ import time
 from typing import Dict, Any, Optional, Tuple
 from dotenv import load_dotenv
 from datetime import datetime
+from pyatlan.client.atlan import AtlanClient
+from pyatlan.model.assets import Asset
 
 # Load environment variables
 load_dotenv()
@@ -131,68 +133,43 @@ def get_space_info(space_guid):
     # First, check if we have Atlan API configured
     if ATLAN_API_TOKEN:
         try:
-            # Use direct API call instead of pyatlan SDK
-            headers = {
-                'Authorization': f'Bearer {ATLAN_API_TOKEN}',
-                'Content-Type': 'application/json'
-            }
+            # Initialize Atlan client with our API token and host
+            os.environ['ATLAN_API_KEY'] = ATLAN_API_TOKEN
+            os.environ['ATLAN_BASE_URL'] = ATLAN_HOST
+
+            client = AtlanClient()
 
             # Get the asset by GUID
-            response = requests.get(
-                f'{ATLAN_HOST}/api/meta/entity/guid/{space_guid}',
-                headers=headers,
-                timeout=10.0
+            asset = client.asset.get_by_guid(
+                guid=space_guid,
+                asset_type=Asset  # Generic asset type
             )
 
-            if response.status_code == 200:
-                data = response.json()
-                entity = data.get('entity', {})
-                attributes = entity.get('attributes', {})
-                business_attributes = entity.get('businessAttributes', {})
+            # Get the "Genie Spaces Details" custom metadata set
+            # Note: get_custom_metadata doesn't take a client parameter
+            genie_spaces = asset.get_custom_metadata(name="Genie Spaces Details")
 
-                # Look for spaceId in custom metadata
-                databricks_space_id = None
+            # Access the spaceId field
+            databricks_space_id = genie_spaces.get("spaceId") if genie_spaces else None
 
-                # Check in businessAttributes (custom metadata)
-                for cm_set_name, cm_attributes in business_attributes.items():
-                    if 'spaceId' in cm_attributes:
-                        databricks_space_id = cm_attributes['spaceId']
-                        break
-
-                # Fallback: check in regular attributes
-                if not databricks_space_id:
-                    databricks_space_id = attributes.get('spaceId')
-
-                if databricks_space_id:
-                    return jsonify({
-                        'success': True,
-                        'space_id': databricks_space_id,
-                        'name': attributes.get('name', 'Genie Space'),
-                        'description': attributes.get('userDescription', 'Databricks Genie space for data analysis'),
-                        'databricks_url': f"{DATABRICKS_WORKSPACE_URL}/genie/spaces/{databricks_space_id}"
-                    })
-                else:
-                    # No Databricks space ID found
-                    return jsonify({
-                        'success': False,
-                        'error': 'No Databricks space ID found in asset metadata',
-                        'debug': {
-                            'asset_name': attributes.get('name'),
-                            'qualified_name': attributes.get('qualifiedName'),
-                            'business_attributes': list(business_attributes.keys())
-                        }
-                    })
-            elif response.status_code == 401:
+            if databricks_space_id:
                 return jsonify({
-                    'success': False,
-                    'error': 'Atlan API authentication failed. The API token has expired or is invalid.',
-                    'suggestion': 'Please update the ATLAN_API_TOKEN in the .env file with a fresh token from Atlan.',
-                    'demo_available': True
+                    'success': True,
+                    'space_id': databricks_space_id,
+                    'name': asset.name or 'Genie Space',
+                    'description': asset.description or 'Databricks Genie space for data analysis',
+                    'databricks_url': f"{DATABRICKS_WORKSPACE_URL}/genie/spaces/{databricks_space_id}"
                 })
             else:
+                # No Databricks space ID found in custom metadata
                 return jsonify({
                     'success': False,
-                    'error': f'Failed to fetch asset from Atlan: {response.status_code}'
+                    'error': 'No Databricks space ID found in Genie Spaces Details custom metadata',
+                    'debug': {
+                        'asset_name': asset.name,
+                        'qualified_name': asset.qualified_name,
+                        'custom_metadata': genie_spaces
+                    }
                 })
 
         except Exception as e:
