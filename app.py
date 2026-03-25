@@ -5,31 +5,43 @@ Embedded chat interface for Databricks Genie spaces within Atlan
 from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 import os
-import requests
+import httpx
+import requests as http_requests
 import time
+import logging
 from typing import Dict, Any, Optional, Tuple
 from dotenv import load_dotenv
 from datetime import datetime
-from pyatlan.client.atlan import AtlanClient
-from pyatlan.model.assets import Asset
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
+
 # Enable CORS for Atlan domains
 CORS(app, origins=[
+    "https://*.atlan.com",
     "https://home.atlan.com",
     "https://partner-sandbox.atlan.com",
-    "http://localhost:3001"
+    "http://localhost:*"
 ])
 
 # Configuration from environment
 DATABRICKS_WORKSPACE_URL = os.getenv('DATABRICKS_WORKSPACE_URL', '')
 DATABRICKS_TOKEN = os.getenv('DATABRICKS_TOKEN', '')
-ATLAN_HOST = os.getenv('ATLAN_HOST', 'https://partner-sandbox.atlan.com')
-ATLAN_API_TOKEN = os.getenv('ATLAN_API_TOKEN', '')
+ATLAN_INSTANCE_URL = os.getenv('ATLAN_INSTANCE_URL', 'https://partner-sandbox.atlan.com')
+
+
+def get_bearer_token():
+    """Extract Bearer token from Authorization header (passed from frontend OAuth)."""
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return None
+    return auth_header.replace('Bearer ', '')
 
 class GenieClient:
     """Simplified Genie client for chat interface"""
@@ -48,30 +60,33 @@ class GenieClient:
         url = f"{self.api_base}/spaces/{space_id}/start-conversation"
         payload = {"content": question}
 
-        response = requests.post(url, json=payload, headers=self.headers, timeout=30.0)
-        if response.status_code == 401:
-            raise Exception("Authentication failed. Check your Databricks token.")
-        response.raise_for_status()
-        data = response.json()
-        return data["conversation_id"], data["message_id"]
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(url, json=payload, headers=self.headers)
+            if response.status_code == 401:
+                raise Exception("Authentication failed. Check your Databricks token.")
+            response.raise_for_status()
+            data = response.json()
+            return data["conversation_id"], data["message_id"]
 
     def continue_conversation(self, space_id: str, conversation_id: str, question: str) -> str:
         """Continue existing conversation"""
         url = f"{self.api_base}/spaces/{space_id}/conversations/{conversation_id}/messages"
         payload = {"content": question}
 
-        response = requests.post(url, json=payload, headers=self.headers, timeout=30.0)
-        response.raise_for_status()
-        data = response.json()
-        return data["message_id"]
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(url, json=payload, headers=self.headers)
+            response.raise_for_status()
+            data = response.json()
+            return data["message_id"]
 
     def get_message_status(self, space_id: str, conversation_id: str, message_id: str) -> Dict[str, Any]:
         """Get message status and results"""
         url = f"{self.api_base}/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
 
-        response = requests.get(url, headers=self.headers, timeout=30.0)
-        response.raise_for_status()
-        return response.json()
+        with httpx.Client(timeout=30.0) as client:
+            response = client.get(url, headers=self.headers)
+            response.raise_for_status()
+            return response.json()
 
     def wait_for_response(
         self,
@@ -124,85 +139,122 @@ if DATABRICKS_WORKSPACE_URL and DATABRICKS_TOKEN:
 @app.route('/')
 def index():
     """Main chat interface"""
-    return render_template('chat.html')
+    return render_template('chat.html', atlan_instance_url=ATLAN_INSTANCE_URL)
 
 @app.route('/api/space/<space_guid>')
 def get_space_info(space_guid):
-    """Get space information from Atlan asset"""
+    """Get space information from Atlan asset using OAuth Bearer token via REST API."""
 
-    # First, check if we have Atlan API configured
-    if ATLAN_API_TOKEN:
-        try:
-            # Initialize Atlan client with our API token and host
-            os.environ['ATLAN_API_KEY'] = ATLAN_API_TOKEN
-            os.environ['ATLAN_BASE_URL'] = ATLAN_HOST
+    # Demo mode fallback
+    if space_guid == 'demo-space-guid':
+        return jsonify({
+            'success': True,
+            'space_id': '01f10ea33fc010dcb2dc604b75ac4336',
+            'name': 'Wide World Importers Sales (Demo)',
+            'description': 'Demo Genie space for testing',
+            'databricks_url': f"{DATABRICKS_WORKSPACE_URL}/genie/spaces/01f10ea33fc010dcb2dc604b75ac4336"
+        })
 
-            client = AtlanClient()
+    # Extract OAuth Bearer token from frontend
+    token = get_bearer_token()
+    if not token:
+        return jsonify({
+            'success': False,
+            'error': 'No authorization token provided. Please authenticate with Atlan.',
+            'demo_available': True
+        })
 
-            # Get the asset by GUID
-            asset = client.asset.get_by_guid(
-                guid=space_guid,
-                asset_type=Asset  # Generic asset type
-            )
+    try:
+        # Fetch asset via Atlan REST API with user's OAuth token
+        api_url = f"{ATLAN_INSTANCE_URL}/api/meta/entity/guid/{space_guid}"
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json'
+        }
 
-            # Get the "Genie Spaces Details" custom metadata set
-            # Note: get_custom_metadata doesn't take a client parameter
-            genie_spaces = asset.get_custom_metadata(name="Genie Spaces Details")
+        logger.info(f"Fetching asset: {api_url}")
+        response = http_requests.get(api_url, headers=headers, timeout=30)
 
-            # Access the spaceId field
-            databricks_space_id = genie_spaces.get("spaceId") if genie_spaces else None
+        if response.status_code == 401:
+            return jsonify({
+                'success': False,
+                'error': 'Atlan authentication failed. Your session may have expired.',
+                'demo_available': True
+            })
+        elif response.status_code == 404:
+            return jsonify({
+                'success': False,
+                'error': f'Asset not found: {space_guid}'
+            })
+        elif response.status_code != 200:
+            return jsonify({
+                'success': False,
+                'error': f'Atlan API error: {response.status_code}'
+            })
 
-            if databricks_space_id:
-                return jsonify({
-                    'success': True,
-                    'space_id': databricks_space_id,
-                    'name': asset.name or 'Genie Space',
-                    'description': asset.description or 'Databricks Genie space for data analysis',
-                    'databricks_url': f"{DATABRICKS_WORKSPACE_URL}/genie/spaces/{databricks_space_id}"
-                })
-            else:
-                # No Databricks space ID found in custom metadata
-                return jsonify({
-                    'success': False,
-                    'error': 'No Databricks space ID found in Genie Spaces Details custom metadata',
-                    'debug': {
-                        'asset_name': asset.name,
-                        'qualified_name': asset.qualified_name,
-                        'custom_metadata': genie_spaces
-                    }
-                })
+        # Parse the REST API response
+        data = response.json()
+        entity = data.get('entity', data)
+        attributes = entity.get('attributes', {})
+        business_attributes = entity.get('businessAttributes', {})
 
-        except Exception as e:
-            error_msg = str(e)
-            if '401' in error_msg or 'Unauthorized' in error_msg:
-                return jsonify({
-                    'success': False,
-                    'error': 'Atlan API authentication failed. The API token has expired or is invalid.',
-                    'suggestion': 'Please update the ATLAN_API_TOKEN in the .env file with a fresh token from Atlan.',
-                    'demo_available': True
-                })
-            else:
-                return jsonify({
-                    'success': False,
-                    'error': f'Error fetching from Atlan: {error_msg}'
-                })
+        logger.info(f"Asset: {attributes.get('name')} | businessAttributes keys: {list(business_attributes.keys())}")
 
-    # Fallback to demo mode if no Atlan API configured
-    else:
-        # Demo mode - use a hardcoded space for testing
-        if space_guid == 'demo-space-guid':
+        # Find "Genie Spaces Details" custom metadata
+        genie_metadata = None
+        genie_key_found = None
+
+        # Try exact name first
+        if 'Genie Spaces Details' in business_attributes:
+            genie_metadata = business_attributes['Genie Spaces Details']
+            genie_key_found = 'Genie Spaces Details'
+        else:
+            # Search for any key containing "genie" (case-insensitive)
+            for key in business_attributes:
+                if 'genie' in key.lower():
+                    genie_metadata = business_attributes[key]
+                    genie_key_found = key
+                    break
+
+        # Extract spaceId from custom metadata
+        databricks_space_id = None
+        if genie_metadata:
+            databricks_space_id = (genie_metadata.get('spaceId')
+                                   or genie_metadata.get('space_id')
+                                   or genie_metadata.get('spaceid'))
+
+        if databricks_space_id:
             return jsonify({
                 'success': True,
-                'space_id': '01f10ea33fc010dcb2dc604b75ac4336',
-                'name': 'Wide World Importers Sales (Demo)',
-                'description': 'Demo Genie space for testing',
-                'databricks_url': f"{DATABRICKS_WORKSPACE_URL}/genie/spaces/01f10ea33fc010dcb2dc604b75ac4336"
+                'space_id': databricks_space_id,
+                'name': attributes.get('name') or entity.get('displayText') or 'Genie Space',
+                'description': attributes.get('userDescription') or attributes.get('description') or 'Databricks Genie space for data analysis',
+                'databricks_url': f"{DATABRICKS_WORKSPACE_URL}/genie/spaces/{databricks_space_id}"
             })
         else:
             return jsonify({
                 'success': False,
-                'error': 'Atlan API not configured. Set ATLAN_API_TOKEN to fetch real asset data.'
+                'error': 'No Databricks space ID found in Genie Spaces Details custom metadata',
+                'debug': {
+                    'asset_name': attributes.get('name'),
+                    'business_attribute_keys': list(business_attributes.keys()),
+                    'genie_key_found': genie_key_found,
+                    'genie_metadata': genie_metadata
+                }
             })
+
+    except http_requests.exceptions.RequestException as e:
+        logger.error(f"Request error: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to connect to Atlan API: {str(e)}'
+        })
+    except Exception as e:
+        logger.error(f"Error fetching asset: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Error fetching from Atlan: {str(e)}'
+        })
 
 @app.route('/api/chat', methods=['POST'])
 def chat():

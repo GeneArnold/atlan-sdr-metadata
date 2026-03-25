@@ -309,6 +309,9 @@
             100% { transform: rotate(360deg); }
         }
     </style>
+
+    <!-- Atlan Auth SDK for OAuth -->
+    <script src="https://unpkg.com/@atlanhq/atlan-auth@latest/dist/atlan-auth.umd.min.js"></script>
 </head>
 <body>
     <div class="header">
@@ -356,11 +359,135 @@
     </div>
 
     <script>
+        // Configuration — injected from Flask template
+        const ATLAN_INSTANCE_URL = '{{ atlan_instance_url }}';
+
         let currentSpaceId = null;
         let currentConversationId = null;
-        let isConfigured = undefined;  // Start as undefined so we know if it hasn't been checked yet
-        let handshakeReceived = false;
-        let authContextReceived = false;
+        let isConfigured = false;
+        let authToken = null;
+        let assetGuidFromMessage = null;
+
+        // =============================================
+        // Helper: get auth headers for API calls
+        // =============================================
+        function getAuthHeaders() {
+            const headers = { 'Content-Type': 'application/json' };
+            if (authToken) {
+                headers['Authorization'] = `Bearer ${authToken}`;
+            }
+            return headers;
+        }
+
+        // =============================================
+        // Raw postMessage listener — BEFORE SDK init
+        // Captures asset GUID that the SDK strips in embedded mode
+        // =============================================
+        window.addEventListener('message', (event) => {
+            const { type, payload } = event.data || {};
+
+            if (type === 'ATLAN_AUTH_CONTEXT') {
+                if (payload?.page?.params?.id) {
+                    assetGuidFromMessage = payload.page.params.id;
+                    console.log('[GENIE] Asset GUID captured from postMessage:', assetGuidFromMessage);
+                }
+            }
+        });
+
+        // =============================================
+        // Atlan Auth SDK initialization
+        // =============================================
+        function initializeAtlanAuth() {
+            console.log('[GENIE] Initializing Atlan Auth SDK...');
+            console.log('[GENIE] Target instance:', ATLAN_INSTANCE_URL);
+
+            try {
+                const { AtlanAuth } = window.AtlanAuthSDK;
+
+                const atlan = new AtlanAuth({
+                    origin: ATLAN_INSTANCE_URL,
+
+                    onReady: async (context) => {
+                        console.log('[GENIE] Authentication successful!');
+                        authToken = context.token || atlan.getToken();
+
+                        const mode = context.mode || 'unknown';
+                        const user = context.user || {};
+                        console.log('[GENIE] Mode:', mode, '| User:', user.username || 'N/A');
+
+                        // Update status
+                        document.getElementById('statusText').textContent = `Authenticated as ${user.username || user.name || 'user'}`;
+
+                        // Check Databricks config
+                        await checkConfiguration();
+
+                        // Determine asset GUID
+                        let spaceGuid = null;
+                        if (mode === 'embedded') {
+                            spaceGuid = assetGuidFromMessage;
+                        } else {
+                            spaceGuid = context.page?.params?.id || null;
+                        }
+
+                        if (spaceGuid) {
+                            await loadSpace(spaceGuid);
+                        } else {
+                            document.getElementById('loadingMessage').innerHTML = `
+                                <div style="text-align: center; padding: 40px; color: #666;">
+                                    <h3>Authenticated</h3>
+                                    <p style="margin-top: 10px;">Select a Genie space asset in Atlan to start chatting.</p>
+                                    <button onclick="loadSpace('demo-space-guid')" style="
+                                        margin-top: 15px;
+                                        padding: 10px 20px;
+                                        background: #667eea;
+                                        color: white;
+                                        border: none;
+                                        border-radius: 6px;
+                                        cursor: pointer;
+                                        font-size: 14px;
+                                    ">
+                                        Try Demo Mode
+                                    </button>
+                                </div>
+                            `;
+                        }
+                    },
+
+                    onError: (error) => {
+                        console.error('[GENIE] Authentication failed:', error);
+                        document.getElementById('statusText').textContent = 'Authentication failed';
+                        document.getElementById('loadingMessage').innerHTML = `
+                            <div style="color: #c00; text-align: center; padding: 40px;">
+                                <h3>Authentication Error</h3>
+                                <p style="margin-top: 10px;">${error.message || 'Failed to authenticate with Atlan.'}</p>
+                                <p style="margin-top: 10px; font-size: 12px; color: #666;">
+                                    If this is a redirect_uri error, the app URL needs to be registered in Atlan.
+                                </p>
+                                <button onclick="loadSpace('demo-space-guid')" style="
+                                    margin-top: 15px;
+                                    padding: 10px 20px;
+                                    background: #667eea;
+                                    color: white;
+                                    border: none;
+                                    border-radius: 6px;
+                                    cursor: pointer;
+                                    font-size: 14px;
+                                ">
+                                    Try Demo Mode (no auth)
+                                </button>
+                            </div>
+                        `;
+                    }
+                });
+
+                atlan.init();
+            } catch (e) {
+                console.error('[GENIE] SDK init error:', e);
+                // SDK may fail — allow demo mode
+                document.getElementById('statusText').textContent = 'SDK unavailable';
+                checkConfiguration();
+            }
+        }
 
         // Check configuration on load
         async function checkConfiguration() {
@@ -368,12 +495,11 @@
                 const response = await fetch('/api/config');
                 const data = await response.json();
                 isConfigured = data.configured;
-                console.log('Configuration check:', { configured: isConfigured });
 
                 if (!isConfigured) {
                     document.getElementById('loadingMessage').innerHTML = `
                         <div style="color: #c00;">
-                            <h3>⚠️ Configuration Required</h3>
+                            <h3>Configuration Required</h3>
                             <p style="margin-top: 10px;">
                                 Databricks Genie is not configured. Please set:
                             </p>
@@ -384,117 +510,19 @@
                         </div>
                     `;
                 }
-                return isConfigured;
             } catch (error) {
                 console.error('Configuration check failed:', error);
-                isConfigured = false;
-                return false;
             }
         }
 
-        // Set up message listener immediately (not waiting for window.load)
-        console.log('Setting up message listener at:', new Date().toISOString());
-
-        window.addEventListener('message', async (event) => {
-            console.log('[MESSAGE] Received at', new Date().toISOString(), ':', event.data);
-            console.log('[MESSAGE] Origin:', event.origin);
-
-            // Safety check for data
-            if (!event.data || typeof event.data !== 'object') {
-                console.log('[MESSAGE] Invalid message format, ignoring');
-                return;
-            }
-
-            const allowedOrigins = [
-                'https://home.atlan.com',
-                'https://partner-sandbox.atlan.com',
-                'http://localhost:3001'
-            ];
-
-            if (!allowedOrigins.includes(event.origin) && event.origin !== window.location.origin) {
-                console.log('[MESSAGE] Ignoring message from unauthorized origin:', event.origin);
-                return;
-            }
-
-            const { type, payload } = event.data;
-            console.log('[MESSAGE] Processing type:', type);
-
-            // Handle Atlan handshake
-            if (type === 'ATLAN_HANDSHAKE') {
-                handshakeReceived = true;
-                console.log('[HANDSHAKE] Received, responding with IFRAME_READY');
-
-                // Always respond to handshake
-                window.parent.postMessage({
-                    type: 'IFRAME_READY',
-                    payload: { ready: true }
-                }, event.origin);
-
-                // Also try to proactively fetch config if not done
-                if (isConfigured === undefined) {
-                    checkConfiguration();
-                }
-            }
-            // Handle auth context with asset info
-            else if (type === 'ATLAN_AUTH_CONTEXT') {
-                authContextReceived = true;
-                console.log('[AUTH_CONTEXT] Received:', payload);
-
-                // Defensive check for payload structure
-                if (payload && payload.page && payload.page.params && payload.page.params.id) {
-                    const spaceGuid = payload.page.params.id;
-                    console.log('[AUTH_CONTEXT] Loading space with GUID:', spaceGuid);
-
-                    // Ensure configuration is checked before loading space
-                    if (isConfigured === undefined) {
-                        await checkConfiguration();
-                    }
-
-                    await loadSpace(spaceGuid);
-                } else {
-                    console.error('[AUTH_CONTEXT] Missing required data in payload:', payload);
-                    document.getElementById('loadingMessage').innerHTML = `
-                        <div style="color: #c00;">
-                            <h3>⚠️ Invalid Context</h3>
-                            <p style="margin-top: 10px;">
-                                No asset GUID received from Atlan. Please select a Genie space asset.
-                            </p>
-                        </div>
-                    `;
-                }
-            }
-            // Handle logout
-            else if (type === 'ATLAN_LOGOUT') {
-                console.log('[LOGOUT] Received logout message');
-                currentSpaceId = null;
-                currentConversationId = null;
-                document.getElementById('messages').innerHTML = `
-                    <div class="loading-message">
-                        Session ended. Please refresh to continue.
-                    </div>
-                `;
-                document.getElementById('chatForm').style.display = 'none';
-            }
-        });
-
-        async function loadSpace(guid, retryCount = 0) {
-            // Check configuration status first
-            if (isConfigured === undefined) {
-                console.log('[LOAD_SPACE] Configuration not checked yet, checking now');
-                await checkConfiguration();
-            }
-
-            if (!isConfigured) {
-                console.log('[LOAD_SPACE] Not configured, cannot load space');
-                return;
-            }
-
-            console.log(`[LOAD_SPACE] Fetching space info for GUID: ${guid} (attempt ${retryCount + 1})`);
+        async function loadSpace(guid) {
+            if (!isConfigured) return;
 
             try {
-                const response = await fetch(`/api/space/${guid}`);
+                const response = await fetch(`/api/space/${guid}`, {
+                    headers: getAuthHeaders()
+                });
                 const data = await response.json();
-                console.log('[LOAD_SPACE] API response:', data);
 
                 if (data.success) {
                     currentSpaceId = data.space_id;
@@ -534,10 +562,7 @@
                     if (data.demo_available) {
                         errorHtml = `
                             <div style="color: #c00;">
-                                <h3>⚠️ ${data.error}</h3>
-                                <p style="margin-top: 10px; color: #666;">
-                                    ${data.suggestion || 'Please check your API token.'}
-                                </p>
+                                <h3>${data.error}</h3>
                                 <button onclick="loadSpace('demo-space-guid')" style="
                                     margin-top: 15px;
                                     padding: 10px 20px;
@@ -562,34 +587,12 @@
                     document.getElementById('loadingMessage').innerHTML = errorHtml;
                 }
             } catch (error) {
-                console.error('[LOAD_SPACE] Failed to load space:', error);
-
-                // Retry logic for network errors
-                if (retryCount < 2 && error.name === 'TypeError') {
-                    console.log(`[LOAD_SPACE] Network error, retrying in 1 second...`);
-                    setTimeout(() => {
-                        loadSpace(guid, retryCount + 1);
-                    }, 1000);
-                } else {
-                    document.getElementById('loadingMessage').innerHTML = `
-                        <div style="color: #c00;">
-                            <h3>⚠️ Failed to load space</h3>
-                            <p style="margin-top: 10px;">${error.message}</p>
-                            <button onclick="location.reload()" style="
-                                margin-top: 15px;
-                                padding: 10px 20px;
-                                background: #667eea;
-                                color: white;
-                                border: none;
-                                border-radius: 6px;
-                                cursor: pointer;
-                                font-size: 14px;
-                            ">
-                                Refresh Page
-                            </button>
-                        </div>
-                    `;
-                }
+                console.error('Failed to load space:', error);
+                document.getElementById('loadingMessage').innerHTML = `
+                    <div style="color: #c00;">
+                        Failed to load space: ${error.message}
+                    </div>
+                `;
             }
         }
 
@@ -675,7 +678,7 @@
             try {
                 const response = await fetch('/api/chat', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: getAuthHeaders(),
                     body: JSON.stringify({
                         space_id: currentSpaceId,
                         message: message,
@@ -701,48 +704,10 @@
             }
         });
 
-        // Check configuration immediately (don't wait for DOM)
-        console.log('[INIT] Checking configuration immediately');
-        checkConfiguration();
-
-        // Also set up DOM ready handler for UI updates
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', () => {
-                console.log('[INIT] DOM ready');
-            });
-        } else {
-            console.log('[INIT] DOM already loaded');
-        }
-
-        // Proactively send ready signal after a small delay to handle timing issues
-        setTimeout(() => {
-            if (!handshakeReceived) {
-                console.log('[INIT] No handshake received yet, proactively sending IFRAME_READY');
-                const parentOrigin = document.referrer ? new URL(document.referrer).origin : 'https://partner-sandbox.atlan.com';
-
-                window.parent.postMessage({
-                    type: 'IFRAME_READY',
-                    payload: { ready: true }
-                }, parentOrigin);
-            }
-        }, 500);
-
-        // Test mode - for development
-        const urlParams = new URLSearchParams(window.location.search);
-        if (urlParams.get('test') === 'true') {
-            setTimeout(() => {
-                window.postMessage({
-                    type: 'ATLAN_AUTH_CONTEXT',
-                    payload: {
-                        page: {
-                            params: {
-                                id: 'demo-space-guid'
-                            }
-                        }
-                    }
-                }, '*');
-            }, 1000);
-        }
+        // Initialize on load
+        window.addEventListener('load', () => {
+            initializeAtlanAuth();
+        });
     </script>
 </body>
 </html>
