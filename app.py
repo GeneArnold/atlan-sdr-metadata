@@ -200,28 +200,22 @@ def get_space_info(space_guid):
 
         logger.info(f"Asset: {attributes.get('name')} | businessAttributes keys: {list(business_attributes.keys())}")
 
-        # Find "Genie Spaces Details" custom metadata
+        # Find custom metadata containing spaceId
+        # Note: Atlan uses internal hashed keys for businessAttributes (e.g. 'yVXFsjFSYh1C7R32iwrbf7')
+        # not the display name, so we search all values for the spaceId field
         genie_metadata = None
         genie_key_found = None
-
-        # Try exact name first
-        if 'Genie Spaces Details' in business_attributes:
-            genie_metadata = business_attributes['Genie Spaces Details']
-            genie_key_found = 'Genie Spaces Details'
-        else:
-            # Search for any key containing "genie" (case-insensitive)
-            for key in business_attributes:
-                if 'genie' in key.lower():
-                    genie_metadata = business_attributes[key]
-                    genie_key_found = key
-                    break
-
-        # Extract spaceId from custom metadata
         databricks_space_id = None
-        if genie_metadata:
-            databricks_space_id = (genie_metadata.get('spaceId')
-                                   or genie_metadata.get('space_id')
-                                   or genie_metadata.get('spaceid'))
+
+        for key, value in business_attributes.items():
+            if isinstance(value, dict):
+                sid = value.get('spaceId') or value.get('space_id') or value.get('spaceid')
+                if sid:
+                    genie_metadata = value
+                    genie_key_found = key
+                    databricks_space_id = sid
+                    logger.info(f"Found spaceId '{sid}' in businessAttributes key '{key}'")
+                    break
 
         if databricks_space_id:
             return jsonify({
