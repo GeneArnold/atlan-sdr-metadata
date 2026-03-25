@@ -210,16 +210,19 @@ def get_space_info(space_guid):
         genie_key_found = None
         databricks_space_id = None
 
+        import re
+        # Databricks space IDs are 32-char hex strings like '01f10ea33fc010dcb2dc604b75ac4336'
+        hex_id_pattern = re.compile(r'^[0-9a-f]{20,}$')
+
         for key, value in business_attributes.items():
             if isinstance(value, dict):
-                # Try known field names, then search all string values for a space-id-like pattern
+                # Try known field names first
                 sid = value.get('spaceId') or value.get('space_id') or value.get('spaceid')
                 if not sid:
-                    # Field names may also be hashed — look for any value that looks like a Databricks space ID
+                    # Field names may also be hashed — search values for hex ID pattern
                     for fkey, fval in value.items():
-                        if isinstance(fval, str) and len(fval) > 10:
-                            logger.info(f"  Checking field '{fkey}' = '{fval}'")
-                            # Databricks space IDs are hex strings like '01f10ea33fc010dcb2dc604b75ac4336'
+                        if isinstance(fval, str) and hex_id_pattern.match(fval):
+                            logger.info(f"  Matched hex ID in field '{fkey}' = '{fval}'")
                             sid = fval
                             break
                 if sid:
