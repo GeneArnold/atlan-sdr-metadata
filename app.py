@@ -200,16 +200,28 @@ def get_space_info(space_guid):
 
         logger.info(f"Asset: {attributes.get('name')} | businessAttributes keys: {list(business_attributes.keys())}")
 
+        # Log full businessAttributes content so we can see the actual field names
+        for bkey, bval in business_attributes.items():
+            logger.info(f"businessAttributes['{bkey}'] = {bval}")
+
         # Find custom metadata containing spaceId
-        # Note: Atlan uses internal hashed keys for businessAttributes (e.g. 'yVXFsjFSYh1C7R32iwrbf7')
-        # not the display name, so we search all values for the spaceId field
+        # Note: Atlan uses internal hashed keys for both the metadata set AND its fields
         genie_metadata = None
         genie_key_found = None
         databricks_space_id = None
 
         for key, value in business_attributes.items():
             if isinstance(value, dict):
+                # Try known field names, then search all string values for a space-id-like pattern
                 sid = value.get('spaceId') or value.get('space_id') or value.get('spaceid')
+                if not sid:
+                    # Field names may also be hashed — look for any value that looks like a Databricks space ID
+                    for fkey, fval in value.items():
+                        if isinstance(fval, str) and len(fval) > 10:
+                            logger.info(f"  Checking field '{fkey}' = '{fval}'")
+                            # Databricks space IDs are hex strings like '01f10ea33fc010dcb2dc604b75ac4336'
+                            sid = fval
+                            break
                 if sid:
                     genie_metadata = value
                     genie_key_found = key
